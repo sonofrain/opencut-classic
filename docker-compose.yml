@@ -8,8 +8,6 @@ services:
       POSTGRES_DB: opencut
     volumes:
       - postgres_data:/var/lib/postgresql/data
-    ports:
-      - "5432:5432"
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U opencut"]
       interval: 30s
@@ -20,8 +18,6 @@ services:
   redis:
     image: redis:7-alpine
     restart: unless-stopped
-    ports:
-      - "6379:6379"
     healthcheck:
       test: ["CMD", "redis-cli", "ping"]
       interval: 30s
@@ -57,6 +53,7 @@ services:
         - NEXT_PUBLIC_MARBLE_API_URL=${NEXT_PUBLIC_MARBLE_API_URL:-https://api.marblecms.com}
         - MARBLE_WORKSPACE_KEY=${MARBLE_WORKSPACE_KEY:-build-placeholder}
     restart: unless-stopped
+    init: true          # tini 当 pid 1：healthcheck 的 sh/wget 退出后被回收，不再堆僵尸
     ports:
       - "3100:3000"
     environment:
@@ -76,7 +73,7 @@ services:
       serverless-redis-http:
         condition: service_healthy
     healthcheck:
-      test: ["CMD-SHELL", "curl -f http://localhost:3000/api/health || exit 1"]
+      test: ["CMD-SHELL", "wget -q -O /dev/null http://127.0.0.1:3000/api/health || exit 1"]
       interval: 30s
       timeout: 10s
       retries: 5

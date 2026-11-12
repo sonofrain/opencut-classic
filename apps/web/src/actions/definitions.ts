@@ -183,6 +183,21 @@ const ACTION_DEFAULT_SHORTCUTS_BY_ACTION = new Map<
 	readonly ShortcutKey[]
 >(ACTION_DEFAULT_SHORTCUTS);
 
+const ACTIONS_WITH_REQUIRED_ARGS: ReadonlySet<string> = new Set([
+	"remove-media-asset",
+	"remove-media-assets",
+]);
+
+export function isActionWithOptionalArgs(
+	value: unknown,
+): value is TActionWithOptionalArgs {
+	return (
+		typeof value === "string" &&
+		value in ACTIONS &&
+		!ACTIONS_WITH_REQUIRED_ARGS.has(value)
+	);
+}
+
 export function getActionDefinition({
 	action,
 }: {

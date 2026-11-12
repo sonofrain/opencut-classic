@@ -1,3 +1,7 @@
+> **This is a personal fork.** Upstream: [OpenCut-app/opencut-classic](https://github.com/OpenCut-app/opencut-classic) (archived).
+> All local changes live on the `local` branch; `main` tracks upstream verbatim.
+> 本仓库是自用 fork，改动清单见文末。
+
 # OpenCut (Legacy)
 
 This is the original OpenCut codebase. It's archived and no longer maintained.
@@ -160,3 +164,56 @@ See our [Contributing Guide](.github/CONTRIBUTING.md) for detailed setup instruc
 
 ![Star History Chart](https://api.star-history.com/svg?repos=opencut-app/opencut&type=Date)
 
+
+
+---
+
+## 本 fork 的改动（自用，不提 PR）
+
+上游 `opencut-classic` 已于 2025 年归档，不再更新；本 fork 只保留本机部署必须的修补。
+`main` = 上游原样，`local` = 下面这些改动。
+
+### 1. `docker-compose.yml`：web 服务加 `init: true`，修僵尸进程堆积
+
+```yaml
+  web:
+    restart: unless-stopped
+    init: true          # tini 当 pid 1：healthcheck 的 sh/wget 退出后被回收，不再堆僵尸
+```
+
+**症状**：容器跑起来后宿主 `ps` 里出现上百个 `wget <defunct>`，一天能到 128+，重启容器才清。
+
+**根因**：compose 里 web 服务的 healthcheck 用 `CMD-SHELL` 起 `sh -c "wget ..."`，每 30 秒一轮。这些进程的父进程是容器的 pid 1（`node`/`bun` 应用）。运行时不会为「非自己 spawn」的子进程 `wait`，于是每次探活都留一个僵尸。
+
+**修法**：`init: true` 让 Docker 在容器里注入 tini 当 pid 1，所有孤儿和探活子进程都会被 `wait` 掉。
+
+**验证**：重建后 `ps -eo stat=,comm= | awk '$1 ~ /^Z/'` 观察 10 分钟（20 次探活）仍为 0。
+
+### 2. `docker-compose.yml`：去掉 postgres / redis 的宿主端口暴露
+
+上游把 `5432` 和 `6379` 直接映射到宿主，本机没必要暴露数据库和缓存：
+
+```yaml
+-    ports:
+-      - "5432:5432"
+```
+
+容器之间走 compose 网络，功能不受影响。
+
+### 3. TypeScript 编译适配（classic 代码 vs 升级后的依赖）
+
+上游归档后依赖继续升级，几处调用点的 API 签名变了，不改编译不过：
+
+- `apps/web/src/services/storage/migrations/runner.ts`、`v1-to-v2.ts`
+  `new IndexedDBAdapter(name, store, version)` → `new IndexedDBAdapter({ dbName, storeName, version })`；
+  `adapter.set(key, val)` → `adapter.set({ key, val })`
+- `apps/web/src/stickers/providers/index.ts`
+  `registry.register(id, provider)` → `registry.register({ key: id, definition: provider })`
+- `apps/web/src/actions/definitions.ts`、`keybinding.ts`
+  新增 `isActionWithOptionalArgs()` 类型守卫，收窄 `TActionWithOptionalArg` 判定（`remove-media-asset(s)` 必须带参数）
+
+这些只改调用点，不动业务逻辑。
+
+---
+
+*上游已归档，没有跟进成本。若将来迁到新版 OpenCut（重写版），本 fork 作废。*
