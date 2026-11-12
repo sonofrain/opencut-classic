@@ -47,7 +47,12 @@ services:
     build:
       context: .
       dockerfile: ./apps/web/Dockerfile
+      # 构建期要走宿主 Clash（大陆访问 Google Fonts / npm 必需）。
+      # host 网络下容器里的 127.0.0.1:7890 就是宿主的 Clash。
+      network: host
       args:
+        - HTTP_PROXY=http://127.0.0.1:7890
+        - HTTPS_PROXY=http://127.0.0.1:7890
         - FREESOUND_CLIENT_ID=${FREESOUND_CLIENT_ID}
         - FREESOUND_API_KEY=${FREESOUND_API_KEY}
         - NEXT_PUBLIC_MARBLE_API_URL=${NEXT_PUBLIC_MARBLE_API_URL:-https://api.marblecms.com}
@@ -56,8 +61,12 @@ services:
     init: true          # tini 当 pid 1：healthcheck 的 sh/wget 退出后被回收，不再堆僵尸
     ports:
       - "3100:3000"
+    volumes:
+      # 转码产物（服务器只留转码后的文件，源文件转完即删）
+      - ${OPENCUT_MEDIA_DIR:-./media}:/data/media
     environment:
       - NODE_ENV=production
+      - OPENCUT_MEDIA_ROOT=/data/media
       - DATABASE_URL=postgresql://opencut:opencut@db:5432/opencut
       - BETTER_AUTH_SECRET=your-production-secret-key-here
       - UPSTASH_REDIS_REST_URL=http://serverless-redis-http:80

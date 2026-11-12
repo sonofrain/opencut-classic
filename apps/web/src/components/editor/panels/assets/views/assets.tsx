@@ -1,7 +1,7 @@
 "use client";
 
 import Image from "next/image";
-import { useMemo, useState } from "react";
+import { useMemo, useRef, useState } from "react";
 import { PanelView } from "@/components/editor/panels/assets/views/base-panel";
 import { MediaDragOverlay } from "@/components/editor/panels/assets/drag-overlay";
 import { DraggableItem } from "@/components/editor/panels/assets/draggable-item";
@@ -31,6 +31,24 @@ import { useEditor } from "@/editor/use-editor";
 import { useFileUpload } from "@/media/use-file-upload";
 import { invokeAction } from "@/actions";
 import { processMediaAssets } from "@/media/processing";
+import { readVideoFile } from "@/media/mediabunny";
+import {
+	fetchMediaStats,
+	transcodeFile,
+	type TranscodeProgress,
+} from "@/media/transcode-client";
+import {
+	heightChoiceToValue,
+	readTranscodePrefs,
+	writeTranscodePrefs,
+	type TranscodeHeightChoice,
+} from "@/media/transcode-preference";
+import {
+	TranscodeConfirmDialog,
+	type PendingTranscodeItem,
+	type TranscodeDecision,
+} from "../transcode-confirm-dialog";
+import { TranscodeManagerDialog } from "../transcode-manager-dialog";
 import { showMediaUploadToast } from "@/media/upload-toast";
 import {
 	SelectableItem,
@@ -77,6 +95,117 @@ export function MediaView() {
 	const [isProcessing, setIsProcessing] = useState(false);
 	const [progress, setProgress] = useState(0);
 
+	// —— 服务端转码（浏览器解不了的素材）——
+	const [pendingTranscode, setPendingTranscode] = useState<
+		PendingTranscodeItem[] | null
+	>(null);
+	const [transcodeHeight, setTranscodeHeight] =
+		useState<TranscodeHeightChoice>("1080");
+	const [ffmpegAvailable, setFfmpegAvailable] = useState(true);
+	const [managerOpen, setManagerOpen] = useState(false);
+	const decisionResolver = useRef<
+		((decision: TranscodeDecision) => void) | null
+	>(null);
+
+	const askTranscode = (
+		items: PendingTranscodeItem[],
+		height: TranscodeHeightChoice,
+	) =>
+		new Promise<TranscodeDecision>((resolve) => {
+			decisionResolver.current = resolve;
+			setTranscodeHeight(height);
+			setPendingTranscode(items);
+		});
+
+	const resolveTranscode = (decision: TranscodeDecision) => {
+		setPendingTranscode(null);
+		const resolver = decisionResolver.current;
+		decisionResolver.current = null;
+		resolver?.(decision);
+	};
+
+	/**
+	 * 探测出浏览器解不了的视频，按用户选择送服务端转码。
+	 * 返回替换后的文件列表（转码失败的文件保持原样，让后续流程照常报错）。
+	 */
+	const applyServerTranscode = async ({
+		files,
+	}: {
+		files: File[];
+	}): Promise<File[]> => {
+		const unsupported: PendingTranscodeItem[] = [];
+
+		for (const file of files) {
+			if (!file.type.startsWith("video/")) continue;
+			try {
+				const info = await readVideoFile({ file });
+				if (!info.canDecode) unsupported.push({ file, codec: info.codec });
+			} catch {
+				// 连元信息都读不出来，也交给服务端试试
+				unsupported.push({ file, codec: null });
+			}
+		}
+
+		if (unsupported.length === 0) return files;
+
+		const stats = await fetchMediaStats().catch(() => null);
+		const ffmpegOk = Boolean(stats?.ffmpeg);
+		setFfmpegAvailable(ffmpegOk);
+
+		const prefs = readTranscodePrefs();
+		const decision: TranscodeDecision =
+			prefs.mode === "always" && ffmpegOk
+				? { action: "transcode", height: prefs.height, remember: true }
+				: await askTranscode(unsupported, prefs.height);
+
+		if (!ffmpegOk) {
+			toast.error("服务端没有 ffmpeg，无法转码，已按原文件导入");
+			return files;
+		}
+
+		if (decision.action !== "transcode") return files;
+
+		writeTranscodePrefs({
+			height: decision.height,
+			...(decision.remember ? { mode: "always" as const } : {}),
+		});
+
+		const targetHeight = heightChoiceToValue(decision.height);
+		const replaced = new Map<File, File>();
+
+		for (const [index, item] of unsupported.entries()) {
+			const toastId = `transcode-${index}`;
+			const counter = `${index + 1}/${unsupported.length}`;
+			toast.loading(`转码 ${item.file.name}（${counter}）`, { id: toastId });
+
+			try {
+				const transcoded = await transcodeFile({
+					file: item.file,
+					options: { height: targetHeight, crf: 20 },
+					onProgress: (update: TranscodeProgress) => {
+						const suffix =
+							update.stage === "uploading"
+								? `上传 ${update.percent}%`
+								: `${update.percent}%${update.speed ? ` · ${update.speed}` : ""}`;
+						toast.loading(`转码 ${item.file.name}（${counter}）· ${suffix}`, {
+							id: toastId,
+						});
+					},
+				});
+				replaced.set(item.file, transcoded);
+				toast.success(`${item.file.name} 转码完成`, { id: toastId });
+			} catch (error) {
+				toast.error(
+					`${item.file.name} 转码失败：${error instanceof Error ? error.message : "未知错误"}`,
+					{ id: toastId },
+				);
+			}
+		}
+
+		if (replaced.size === 0) return files;
+		return files.map((file) => replaced.get(file) ?? file);
+	};
+
 	const processFiles = async ({ files }: { files: File[] }) => {
 		if (!files || files.length === 0) return;
 		if (!activeProject) {
@@ -87,11 +216,13 @@ export function MediaView() {
 		setIsProcessing(true);
 		setProgress(0);
 		try {
+			const readyFiles = await applyServerTranscode({ files });
+
 			await showMediaUploadToast({
-				filesCount: files.length,
+				filesCount: readyFiles.length,
 				promise: async () => {
 					const processedAssets = await processMediaAssets({
-						files,
+						files: readyFiles,
 						onProgress: (progress: { progress: number }) =>
 							setProgress(progress.progress),
 					});
@@ -191,6 +322,18 @@ export function MediaView() {
 		<>
 			<input {...fileInputProps} />
 
+			<TranscodeConfirmDialog
+				open={pendingTranscode !== null}
+				items={pendingTranscode ?? []}
+				ffmpegAvailable={ffmpegAvailable}
+				initialHeight={transcodeHeight}
+				onDecide={resolveTranscode}
+			/>
+			<TranscodeManagerDialog
+				open={managerOpen}
+				onOpenChange={setManagerOpen}
+			/>
+
 			<PanelView
 				title="Assets"
 				actions={
@@ -202,6 +345,7 @@ export function MediaView() {
 						sortOrder={mediaSortOrder}
 						onSort={handleSort}
 						onImport={openFilePicker}
+						onOpenTranscoder={() => setManagerOpen(true)}
 					/>
 				}
 				className={cn(isDragOver && "bg-accent/30")}
@@ -513,6 +657,7 @@ function MediaActions({
 	sortOrder,
 	onSort,
 	onImport,
+	onOpenTranscoder,
 }: {
 	mediaViewMode: MediaViewMode;
 	setMediaViewMode: (mode: MediaViewMode) => void;
@@ -521,10 +666,26 @@ function MediaActions({
 	sortOrder: MediaSortOrder;
 	onSort: ({ key }: { key: MediaSortKey }) => void;
 	onImport: () => void;
+	onOpenTranscoder: () => void;
 }) {
 	return (
 		<div className="flex gap-1.5">
 			<TooltipProvider>
+				<Tooltip>
+					<TooltipTrigger asChild>
+						<Button
+							size="icon"
+							variant="ghost"
+							onClick={onOpenTranscoder}
+							className="items-center justify-center"
+						>
+							<HugeiconsIcon icon={Video01Icon} />
+						</Button>
+					</TooltipTrigger>
+					<TooltipContent>
+						<p>素材转码（硬盘空间 / 进度 / 缓存）</p>
+					</TooltipContent>
+				</Tooltip>
 				<Tooltip>
 					<TooltipTrigger asChild>
 						<Button

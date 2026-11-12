@@ -214,6 +214,29 @@ See our [Contributing Guide](.github/CONTRIBUTING.md) for detailed setup instruc
 
 这些只改调用点，不动业务逻辑。
 
+### 4. 服务端自动转码（新增功能）
+
+浏览器 WebCodecs 解不了 HEVC / 10bit H.264 / 4:2:2 / ProRes，素材能上传但预览不了。
+现在导入前先探测，解不了的交给服务端 ffmpeg 转成 H.264 8bit 4:2:0 再回传：
+
+- `apps/web/src/app/api/media/transcode/route.ts` —— 流式上传 / 查进度 / 取回产物 / 取消
+- `apps/web/src/app/api/media/stats/route.ts` —— 磁盘空间、任务队列、缓存列表
+- `apps/web/src/app/api/media/_lib/transcode-service.ts` —— ffmpeg 调度、进度解析、磁盘统计
+- `apps/web/src/media/transcode-client.ts` —— 前端上传（XHR 带进度）+ 轮询 + 取回
+- `apps/web/src/media/transcode-preference.ts` —— 分辨率与「仅此次 / 长期允许」偏好
+- `apps/web/src/components/editor/panels/assets/transcode-confirm-dialog.tsx` —— 上传后的询问弹窗
+- `apps/web/src/components/editor/panels/assets/transcode-manager-dialog.tsx` —— 管理弹窗（素材面板工具栏图标）
+
+行为：
+
+- 只处理浏览器解不了的素材，能直接播的不动
+- 默认 1080p，可选 720p / 保持原分辨率
+- 上传后弹窗问「仅此次转码 / 长期允许，直接转」，选长期后不再问
+- 服务器只留转码产物（容器内 `/data/media/out`，宿主 `~/docker/opencut/media`），源文件转完即删
+- 转码参数：libx264 / high / yuv420p / CRF 20 / veryfast / AAC 192k / +faststart
+
+镜像改动：runner 阶段 `apk add ffmpeg`，改用镜像自带的 bun 用户（uid 1000）运行，保持 bind mount 不用 sudo 改属主。
+
 ---
 
 *上游已归档，没有跟进成本。若将来迁到新版 OpenCut（重写版），本 fork 作废。*
