@@ -237,6 +237,53 @@ See our [Contributing Guide](.github/CONTRIBUTING.md) for detailed setup instruc
 
 镜像改动：runner 阶段 `apk add ffmpeg`，改用镜像自带的 bun 用户（uid 1000）运行，保持 bind mount 不用 sudo 改属主。
 
+### 5. 必须用 HTTPS 访问（WebCodecs 只在安全上下文存在）
+
+**现象**：用 `http://<内网IP>:3100` 打开，导入任何视频都弹
+`Can't preview xxx.mp4 — the AVC codec cannot be decoded`，服务端转码之后照样弹。
+
+**根因**：不是解码器缺失，是 WebCodecs 根本没加载。
+`VideoDecoder` / `AudioDecoder` 属于「安全上下文（secure context）」API：
+`https://*` 和 `localhost` / `127.0.0.1` 算，**内网 IP 走 http 不算**。
+非安全上下文里 `window.VideoDecoder === undefined`，mediabunny 的
+`videoTrack.canDecode()` 只能返回 `false`，于是每个素材都被判成「解不了」。
+转码产物是标准 H.264 8bit 4:2:0 也一样报错，因为判定根本没执行到解码那一层。
+
+**自查**（F12 控制台，在 opencut 页面上）：
+
+```js
+window.isSecureContext        // 需要 true
+typeof VideoDecoder           // 需要 "function"
+```
+
+**解决**：给 opencut 套一层带 TLS 的反向代理，本机用 Caddy 内部 CA 自签。
+
+```bash
+# opencut 本体退到内部端口（docker-compose.yml: "3103:3000"）
+docker run -d --name caddy-opencut --restart unless-stopped \
+  -p 3100:443 \
+  -v /path/to/deploy/caddy/Caddyfile:/etc/caddy/Caddyfile:ro \
+  -v caddy-data:/data -v caddy-config:/config \
+  caddy:2-alpine
+```
+
+`deploy/caddy/Caddyfile` 里两个关键点：
+
+- `tls internal` —— Caddy 用本地 CA 给内网 IP 签证书，不依赖公网域名
+- `default_sni <IP>` —— **必须写**。浏览器访问 `https://<IP>` 按 RFC 6066 不发
+  SNI，Caddy 匹配不到证书就回 `tlsv1 alert internal error`，表现是「打不开」
+
+首次访问会提示证书不受信任，点「高级 → 继续前往」即可（此时已是安全上下文）。
+想彻底消警告就把 Caddy 的根证书导进系统信任区：
+
+```bash
+docker exec caddy-opencut cat /data/caddy/pki/authorities/local/root.crt > caddy-ca.crt
+# Windows：certutil -addstore -user Root caddy-ca.crt
+# macOS：  sudo security add-trusted-cert -d -r trustRoot -k /Library/Keychains/System.keychain caddy-ca.crt
+```
+
+端口现状：外部 `3100`（https，Caddy）→ 内部 `3103`（opencut web）。
+
 ---
 
 *上游已归档，没有跟进成本。若将来迁到新版 OpenCut（重写版），本 fork 作废。*

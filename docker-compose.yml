@@ -60,7 +60,7 @@ services:
     restart: unless-stopped
     init: true          # tini 当 pid 1：healthcheck 的 sh/wget 退出后被回收，不再堆僵尸
     ports:
-      - "3100:3000"
+      - "3103:3000"
     volumes:
       # 转码产物（服务器只留转码后的文件，源文件转完即删）
       - ${OPENCUT_MEDIA_DIR:-./media}:/data/media

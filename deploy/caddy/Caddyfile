@@ -1,0 +1,22 @@
+{
+	admin off
+	auto_https disable_redirects
+	# 必写：浏览器访问 https://<IP> 时按规范不发 SNI，
+	# Caddy 就找不到匹配的证书，握手直接回 TLS internal error。
+	# default_sni 让无 SNI 的握手也走这张 IP 证书。
+	default_sni 192.168.10.52
+}
+
+https://192.168.10.52 {
+	tls internal
+	encode zstd gzip
+	request_body {
+		max_size 20GB
+	}
+	reverse_proxy 192.168.10.52:3103 {
+		transport http {
+			read_timeout 30m
+			write_timeout 30m
+		}
+	}
+}
